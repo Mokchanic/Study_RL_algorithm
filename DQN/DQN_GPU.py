@@ -90,15 +90,13 @@ def main():
     q_target.load_state_dict(q.state_dict())
     memory = ReplayBuffer()
 
-    dirPath = os.path.dirname(os.path.realpath(__file__))
-    dirPath = dirPath.replace('/home/blue/reinforcement_algorithm/DQN', '/home/blue/reinforcement_algorithm/Train_data/DQN')
-    
+    dirPath = '/home/blue/reinforcement_alrorithm/Train_data/DQN/DQN_GPU.pt'
 
     print_interval = 20
     score = 0.0
     optimizer = optim.Adam(q.parameters(), lr = learning_rate)
 
-    for n_epi in range(10000):
+    for n_epi in range(2000):
         epsilon = max(0.01, 0.08 - 0.01*(n_epi/200))
 
         s = env.reset()
@@ -122,13 +120,7 @@ def main():
             print("n_episode :{}, score : {:.1f}, n_buffer : {}, eps : {:.1f}%"\
             .format (n_epi, score/print_interval, memory.size(), epsilon*100))
 
-            torch.save(q, dirPath + 'DQN.pt')
-            torch.save(q.state_dict(), dirPath + 'DQN_state_dict.pt')
-            torch.save({
-                'DQN': q.state_dict(),
-                'optimizer': optimizer.state_dict()
-            }, dirPath + 'all.tar')
-
+            torch.save(q.state_dict(), dirPath)
             score = 0.0
 
     
