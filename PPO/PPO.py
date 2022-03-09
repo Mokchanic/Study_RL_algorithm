@@ -1,122 +1,88 @@
-import gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from torch.distributions import Categorical
 
-# Hyperparameters
-learning_rate = 0.0005
-gamma = 0.98
-lmbda = 0.95
-eps_clip = 0.1
-K_epoch = 3
-T_horizon = 20
+from Common.define import PPO_define
 
+device = 'cuda:0' if torch.cuda.is_available() else "cpu"
+
+def mlp(input_dim, mlp_dims, last_relu=False):
+    nn_layers = []
+    mlp_dims = [input_dim] + mlp_dims
+    for i in range(len(mlp_dims) - 1):
+        nn_layers.append(nn.Linear(mlp_dims[i], mlp_dims[i + 1]))
+        if i != len(mlp_dims) - 2 or last_relu:
+            nn_layers.append(nn.ReLU6())
+    net = nn.Sequential(*nn_layers)
+    return net
 
 class PPO(nn.Module):
     def __init__(self):
         super(PPO, self).__init__()
-        self.data = []
+        self.replay_buffer=[]
+        self.define = PPO_define()
+        self.pi_nn = mlp(self.define.INPUT, self.define.MLP_DIMS_PI)
+        self.v_nn  = mlp(self.define.INPUT, self.define.MLP_DIMS_V)
 
-        self.fc1 = nn.Linear(4, 256)
-        self.fc_pi = nn.Linear(256, 2)
-        self.fc_v = nn.Linear(256, 1)
-        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-
-    def pi(self, x, softmax_dim=0):
-        x = F.relu(self.fc1(x))
-        x = self.fc_pi(x)
-        prob = F.softmax(x, dim=softmax_dim)
+    def pi(self, state, softmax_dim = 0):
+        pi_nn = self.pi_nn(state)
+        prob = F.softmax(pi_nn, dim = softmax_dim)
         return prob
 
-    def v(self, x):
-        x = F.relu(self.fc1(x))
-        v = self.fc_v(x)
+    def v (self, state, softmax_dim = 0):
+        v_nn = self.v_nn(state)
+        v = F.softmax(v_nn, dim = softmax_dim)
         return v
 
     def put_data(self, transition):
-        self.data.append(transition)
+        self.replay_buffer.append(transition)
 
     def make_batch(self):
-        s_lst, a_lst, r_lst, s_prime_lst, prob_a_lst, done_lst = [], [], [], [], [], []
-        for transition in self.data:
-            s, a, r, s_prime, prob_a, done = transition
+        state_batch = torch.stack([s for (s, a, r, ns, d, prob) in self.replay_buffer])
+        action_batch = torch.Tensor([a for (s, a, r, ns, d, prob) in self.replay_buffer])
+        reward_batch = torch.Tensor([r for (s, a, r, ns, d, prob) in self.replay_buffer])
+        next_state_batch = torch.stack([ns for (s, a, r, ns, d, prob) in self.replay_buffer])
+        done_batch = torch.Tensor([prob for (s, a, r, ns, d, prob) in self.replay_buffer])
+        prob_batch = torch.Tensor([d for (s, a, r, ns, d, prob) in self.replay_buffer])
 
-            s_lst.append(s)
-            a_lst.append([a])
-            r_lst.append([r])
-            s_prime_lst.append(s_prime)
-            prob_a_lst.append([prob_a])
-            done_mask = 0 if done else 1
-            done_lst.append([done_mask])
+        print("state: ", state_batch)
+        print("action: ", action_batch)
 
-        s, a, r, s_prime, done_mask, prob_a = torch.tensor(s_lst, dtype=torch.float), torch.tensor(a_lst), \
-                                              torch.tensor(r_lst), torch.tensor(s_prime_lst, dtype=torch.float), \
-                                              torch.tensor(done_lst, dtype=torch.float), torch.tensor(prob_a_lst)
-        self.data = []
-        return s, a, r, s_prime, done_mask, prob_a
+        self.replay_buffer.clear()
+        return state_batch, action_batch, reward_batch, next_state_batch, done_batch, prob_batch
 
-    def train_net(self):
-        s, a, r, s_prime, done_mask, prob_a = self.make_batch()
+    def train(self):
+        state_batch, action_batch, reward_batch, next_state_batch, done_mask_batch, prob_batch\
+            = self.make_batch()
 
-        for i in range(K_epoch):
-            td_target = r + gamma * self.v(s_prime) * done_mask
-            delta = td_target - self.v(s)
+        for i in range(self.define.K_epoch):
+            td_target = reward_batch + self.define.gamma * self.v(next_state_batch) * done_mask_batch
+            delta = td_target - self.v(state_batch)
             delta = delta.detach().numpy()
 
             advantage_lst = []
             advantage = 0.0
             for delta_t in delta[::-1]:
-                advantage = gamma * lmbda * advantage + delta_t[0]
+                advantage = self.define.gamma * self.define.lmbda * advantage + delta_t[0]
                 advantage_lst.append([advantage])
-            advantage_lst.reverse()
-            advantage = torch.tensor(advantage_lst, dtype=torch.float)
 
-            pi = self.pi(s, softmax_dim=1)
-            pi_a = pi.gather(1, a)
-            ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
+            advantage_lst.reverse()
+            advantage = torch.tensor(advantage_lst, dtype=torch.float32)
+
+            pi   = self.pi(state_batch, softmax_dim=1)
+            pi_a = pi.gather(1, action_batch)
+            ratio = torch.exp(torch.log(pi_a) - torch.log(prob_batch))
 
             surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1 - eps_clip, 1 + eps_clip) * advantage
-            loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(self.v(s), td_target.detach())
+            surr2 = torch.clamp(ratio, 1-self.define.eps_clip, 1+self.define.eps_clip) * advantage
+            loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(self.v(state_batch) , td_target.detach())
 
             self.optimizer.zero_grad()
             loss.mean().backward()
             self.optimizer.step()
 
 
-def main():
-    env = gym.make('CartPole-v1')
-    model = PPO()
-    score = 0.0
-    print_interval = 20
-
-    for n_epi in range(10000):
-        s = env.reset()
-        done = False
-        while not done:
-            for t in range(T_horizon):
-                prob = model.pi(torch.from_numpy(s).float())
-                m = Categorical(prob)
-                a = m.sample().item()
-                s_prime, r, done, info = env.step(a)
-
-                model.put_data((s, a, r / 100.0, s_prime, prob[a].item(), done))
-                s = s_prime
-
-                score += r
-                if done:
-                    break
-
-            model.train_net()
-
-        if n_epi % print_interval == 0 and n_epi != 0:
-            print("# of episode :{}, avg score : {:.1f}".format(n_epi, score / print_interval))
-            score = 0.0
-
-    env.close()
 
 
-if __name__ == '__main__':
-    main()
+
+
