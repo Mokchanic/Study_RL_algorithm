@@ -69,18 +69,21 @@ def train(q, q_target, buffer, optimizer):
 
 
 def main():
+    dirPath = './Train_data/DQN.pt'
     env = gym.make('CartPole-v1')
     q = Qnet(state_dim=4, action_dim=2)
-    q_target = Qnet(state_dim=4, action_dim=2)
-    q_target.load_state_dict(q.state_dict())
+    # q_target = Qnet(state_dim=4, action_dim=2)
+    # q_target.load_state_dict(q.state_dict())
+    check_point = torch.load(dirPath)
+    q.load_state_dict(check_point['q_state'])
     buffer = ReplayBuffer(4, 2)
 
     score = 0.0
     n_step = 0
     optimizer = optim.Adam(q.parameters(), lr=LEARNING_RATE)
-    dirPath = './Train_data/DQN.pt'
 
     for n_epi in range(MAX_EPI):
+        env.render()
         epsilon = max(0.01, 0.1 - 0.01 * (n_epi/200))
         state = env.reset() # state는 카트의 위치, 카트의 속도, 막대의 각도, 막대의 각속도
         state = torch.tensor(state, dtype=torch.float32).to(device)
@@ -101,18 +104,14 @@ def main():
             if done:
                 break
 
-        if n_step > 5000: # ==buffer_size
-            train(q, q_target, buffer, optimizer)
+        # if n_step > 5000: # ==buffer_size
+        #     train(q, q_target, buffer, optimizer)
 
         if n_epi % PRINT_INTERVAL == 0 and n_epi != 0:
-            q_target.load_state_dict(q.state_dict())
+            # q_target.load_state_dict(q.state_dict())
             print("n_epi :{}, score :{:.1f}, n_step :{}, eps :{:.1f}%"
                   .format(n_epi, score/PRINT_INTERVAL, n_step, epsilon * 100))
             score = 0.0
-
-            torch.save({
-                'q_state': q.state_dict(),
-            }, dirPath)
 
     env.close()
 
